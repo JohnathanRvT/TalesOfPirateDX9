@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Linq;
 using System.Collections.Generic;
+using PacketDecoder;
 
 namespace DiagnosticTool
 {
@@ -14,6 +15,7 @@ namespace DiagnosticTool
         static uint packetCounter = 0;
         static bool handshakeDone = false;
         const uint SESSFLAG = 0x80000000;
+        static PacketParser parser = new PacketParser();
 
         static void Main(string[] args)
         {
@@ -70,7 +72,6 @@ namespace DiagnosticTool
                 byte[] payload = ReadPacket(stream);
                 if (payload == null) return;
 
-                // Payload layout: [SESS(4)][CMD(2)][Data...]
                 if (payload.Length < 6)
                 {
                     Console.WriteLine("Packet too short.");
@@ -80,10 +81,14 @@ namespace DiagnosticTool
                 uint sess = ReadUInt(payload, 0);
                 ushort cmd = ReadUShort(payload, 4);
 
+                byte[] cmdPayload = new byte[payload.Length - 6];
+                Array.Copy(payload, 6, cmdPayload, 0, cmdPayload.Length);
+
+                Console.WriteLine("--- Received Packet ---");
+                Console.WriteLine(parser.Parse(new GamePacket { Len = (ushort)(payload.Length + 2), Cmd = cmd, Payload = cmdPayload }));
+
                 if (cmd != 943) // CMD_MC_SEND_SERVER_PUBLIC_KEY
                 {
-                    Console.WriteLine($"Unexpected first packet: CMD={cmd}, SESS=0x{sess:X8}");
-                    Console.WriteLine("Raw Payload: " + BitConverter.ToString(payload).Replace("-", " "));
                     return;
                 }
 
@@ -92,18 +97,14 @@ namespace DiagnosticTool
                 byte[] publicKeyBytes = new byte[keyLen];
                 Array.Copy(payload, 8, publicKeyBytes, 0, keyLen);
 
-                Console.WriteLine("Received Server Public Key.");
-
                 // 2. Generate AES key and send to server
                 RandomNumberGenerator.Fill(cliPrivateKey);
 
                 using (RSA rsa = RSA.Create())
                 {
-                    // Crypto++ RSA::PublicKey::Save(sink) typically writes PKCS#1 RSAPublicKey (n, e)
                     try {
                         rsa.ImportRSAPublicKey(publicKeyBytes, out _);
                     } catch {
-                        // Fallback to SubjectPublicKeyInfo if PKCS#1 fails
                         rsa.ImportSubjectPublicKeyInfo(publicKeyBytes, out _);
                     }
 
@@ -134,16 +135,18 @@ namespace DiagnosticTool
                 Console.WriteLine("Sent CMD_CM_KITBAGTEMPlocks.");
 
                 // 4. Receive Response
-                byte[] finalResponse = ReadPacket(stream);
-                if (finalResponse != null)
+                byte[] finalPayload = ReadPacket(stream);
+                if (finalPayload != null)
                 {
-                    Console.WriteLine("Received Response:");
-                    Console.WriteLine(BitConverter.ToString(finalResponse).Replace("-", " "));
-                    if (finalResponse.Length >= 6)
+                    if (finalPayload.Length >= 6)
                     {
-                        uint respSess = ReadUInt(finalResponse, 0);
-                        ushort respCmd = ReadUShort(finalResponse, 4);
-                        Console.WriteLine($"Response: SESS=0x{respSess:X8}, CMD={respCmd}");
+                        uint respSess = ReadUInt(finalPayload, 0);
+                        ushort respCmd = ReadUShort(finalPayload, 4);
+                        byte[] respData = new byte[finalPayload.Length - 6];
+                        Array.Copy(finalPayload, 6, respData, 0, respData.Length);
+
+                        Console.WriteLine("--- Received Response ---");
+                        Console.WriteLine(parser.Parse(new GamePacket { Len = (ushort)(finalPayload.Length + 2), Cmd = respCmd, Payload = respData }));
                     }
                 }
                 else
@@ -165,7 +168,7 @@ namespace DiagnosticTool
             while (read < 2)
             {
                 int r = stream.Read(lenBuf, read, 2 - read);
-                if (r == 0) return null;
+                if (r <= 0) return null;
                 read += r;
             }
 
@@ -175,7 +178,7 @@ namespace DiagnosticTool
             while (totalRead < payload.Length)
             {
                 read = stream.Read(payload, totalRead, payload.Length - totalRead);
-                if (read == 0) break;
+                if (read <= 0) break;
                 totalRead += read;
             }
 
