@@ -329,6 +329,7 @@ namespace PacketDecoder
             { 936, "CMD_MC_DELCHA" },
             { 937, "CMD_MC_STARTEXIT" },
             { 938, "CMD_MC_CANCELEXIT" },
+            { 940, "CMD_MC_LOG" },
             { 941, "CMD_MC_CREATE_PASSWORD2" },
             { 942, "CMD_MC_UPDATE_PASSWORD2" },
             { 943, "CMD_MC_SEND_SERVER_PUBLIC_KEY" },
