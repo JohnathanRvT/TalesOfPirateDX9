@@ -13,6 +13,7 @@ namespace DiagnosticTool
         static byte[] cliPrivateKey = new byte[16];
         static uint packetCounter = 0;
         static bool handshakeDone = false;
+        const uint SESSFLAG = 0x80000000;
 
         static void Main(string[] args)
         {
@@ -66,21 +67,30 @@ namespace DiagnosticTool
                 using NetworkStream stream = client.GetStream();
 
                 // 1. Receive Server Public Key
-                byte[] response = ReadPacket(stream);
-                if (response == null) return;
+                byte[] payload = ReadPacket(stream);
+                if (payload == null) return;
 
-                // Handshake packets are binary: [Cmd(2)][Data...]
-                ushort cmd = ReadUShort(response, 0);
-                if (cmd != 943) // CMD_MC_SEND_SERVER_PUBLIC_KEY
+                // Payload layout: [SESS(4)][CMD(2)][Data...]
+                if (payload.Length < 6)
                 {
-                    Console.WriteLine($"Unexpected first packet: {cmd}");
+                    Console.WriteLine("Packet too short.");
                     return;
                 }
 
-                // Packet structure: [Cmd(2)][Short len][Data]
-                ushort keyLen = ReadUShort(response, 2);
+                uint sess = ReadUInt(payload, 0);
+                ushort cmd = ReadUShort(payload, 4);
+
+                if (cmd != 943) // CMD_MC_SEND_SERVER_PUBLIC_KEY
+                {
+                    Console.WriteLine($"Unexpected first packet: CMD={cmd}, SESS=0x{sess:X8}");
+                    Console.WriteLine("Raw Payload: " + BitConverter.ToString(payload).Replace("-", " "));
+                    return;
+                }
+
+                // Data starts at offset 6: [Short len][Data]
+                ushort keyLen = ReadUShort(payload, 6);
                 byte[] publicKeyBytes = new byte[keyLen];
-                Array.Copy(response, 4, publicKeyBytes, 0, keyLen);
+                Array.Copy(payload, 8, publicKeyBytes, 0, keyLen);
 
                 Console.WriteLine("Received Server Public Key.");
 
@@ -89,17 +99,21 @@ namespace DiagnosticTool
 
                 using (RSA rsa = RSA.Create())
                 {
-                    rsa.ImportRSAPublicKey(publicKeyBytes, out _);
+                    // Crypto++ RSA::PublicKey::Save(sink) typically writes PKCS#1 RSAPublicKey (n, e)
+                    try {
+                        rsa.ImportRSAPublicKey(publicKeyBytes, out _);
+                    } catch {
+                        // Fallback to SubjectPublicKeyInfo if PKCS#1 fails
+                        rsa.ImportSubjectPublicKeyInfo(publicKeyBytes, out _);
+                    }
+
                     byte[] encryptedKey = rsa.Encrypt(cliPrivateKey, RSAEncryptionPadding.OaepSHA1);
                     string base64Key = Convert.ToBase64String(encryptedKey);
 
                     MemoryStream ms = new MemoryStream();
+                    WriteUInt(ms, SESSFLAG); // SESS
                     WriteUShort(ms, 355); // CMD_CM_SEND_PRIVATE_KEY
-                    // HANDSHAKE packets don't have WPE counter in WriteCmd but OnProcessData expects it if g_wpe is on.
-                    // Wait, ToClient::OnProcessData for CMD_CM_SEND_PRIVATE_KEY:
-                    // It reads cmd, then counter if g_wpe is on.
-                    // BUT WPacket::WriteCmd adds counter if cmd <= 500. 355 <= 500, so it adds counter.
-                    WriteUInt(ms, packetCounter++);
+                    WriteUInt(ms, packetCounter++); // Counter
                     WriteString(ms, base64Key);
 
                     SendPacket(stream, ms.ToArray());
@@ -110,6 +124,7 @@ namespace DiagnosticTool
                 // 3. Send Target Command
                 // CMD_CM_KITBAGTEMPlocks = 36
                 MemoryStream cmdMs = new MemoryStream();
+                WriteUInt(cmdMs, SESSFLAG); // SESS
                 WriteUShort(cmdMs, 36);
                 WriteUInt(cmdMs, packetCounter++);
                 WriteUShort(cmdMs, 0);
@@ -124,10 +139,11 @@ namespace DiagnosticTool
                 {
                     Console.WriteLine("Received Response:");
                     Console.WriteLine(BitConverter.ToString(finalResponse).Replace("-", " "));
-                    if (finalResponse.Length >= 2)
+                    if (finalResponse.Length >= 6)
                     {
-                        ushort respCmd = ReadUShort(finalResponse, 0);
-                        Console.WriteLine($"Response Command ID: {respCmd}");
+                        uint respSess = ReadUInt(finalResponse, 0);
+                        ushort respCmd = ReadUShort(finalResponse, 4);
+                        Console.WriteLine($"Response: SESS=0x{respSess:X8}, CMD={respCmd}");
                     }
                 }
                 else
@@ -145,38 +161,66 @@ namespace DiagnosticTool
         static byte[] ReadPacket(NetworkStream stream)
         {
             byte[] lenBuf = new byte[2];
-            int read = stream.Read(lenBuf, 0, 2);
-            if (read < 2) return null;
+            int read = 0;
+            while (read < 2)
+            {
+                int r = stream.Read(lenBuf, read, 2 - read);
+                if (r == 0) return null;
+                read += r;
+            }
 
             ushort len = (ushort)((lenBuf[0] << 8) | lenBuf[1]);
-            byte[] data = new byte[len - 2];
+            byte[] payload = new byte[len - 2];
             int totalRead = 0;
-            while (totalRead < data.Length)
+            while (totalRead < payload.Length)
             {
-                read = stream.Read(data, totalRead, data.Length - totalRead);
+                read = stream.Read(payload, totalRead, payload.Length - totalRead);
                 if (read == 0) break;
                 totalRead += read;
             }
 
-            if (handshakeDone)
+            if (handshakeDone && payload.Length > 4)
             {
-                return DecryptAES(data);
+                byte[] sess = new byte[4];
+                Array.Copy(payload, 0, sess, 0, 4);
+
+                byte[] encryptedPart = new byte[payload.Length - 4];
+                Array.Copy(payload, 4, encryptedPart, 0, encryptedPart.Length);
+
+                byte[] decrypted = DecryptAES(encryptedPart);
+                if (decrypted == null) return payload;
+
+                byte[] result = new byte[4 + decrypted.Length];
+                Array.Copy(sess, 0, result, 0, 4);
+                Array.Copy(decrypted, 0, result, 4, decrypted.Length);
+                return result;
             }
-            return data;
+            return payload;
         }
 
-        static void SendPacket(NetworkStream stream, byte[] data)
+        static void SendPacket(NetworkStream stream, byte[] payload)
         {
-            if (handshakeDone)
+            if (handshakeDone && payload.Length >= 4)
             {
-                data = EncryptAES(data);
+                byte[] sess = new byte[4];
+                Array.Copy(payload, 0, sess, 0, 4);
+
+                byte[] plainPart = new byte[payload.Length - 4];
+                Array.Copy(payload, 4, plainPart, 0, plainPart.Length);
+
+                byte[] encryptedPart = EncryptAES(plainPart);
+
+                byte[] newPayload = new byte[4 + encryptedPart.Length];
+                Array.Copy(sess, 0, newPayload, 0, 4);
+                Array.Copy(encryptedPart, 0, newPayload, 4, encryptedPart.Length);
+                payload = newPayload;
             }
 
-            ushort totalLen = (ushort)(data.Length + 2);
+            ushort totalLen = (ushort)(payload.Length + 2);
             byte[] fullPacket = new byte[totalLen];
             fullPacket[0] = (byte)(totalLen >> 8);
             fullPacket[1] = (byte)(totalLen & 0xFF);
-            Array.Copy(data, 0, fullPacket, 2, data.Length);
+            Array.Copy(payload, 0, fullPacket, 2, payload.Length);
 
             stream.Write(fullPacket, 0, fullPacket.Length);
         }
@@ -186,24 +230,6 @@ namespace DiagnosticTool
             byte[] iv = new byte[16];
             RandomNumberGenerator.Fill(iv);
 
-            // Server uses 16-byte IV with GCM. .NET's AesGcm expects 12.
-            // However, Crypto++'s GCM<AES> with 16-byte IV is just using the first 12 bytes as nonce
-            // and last 4 bytes as initial counter? Actually Crypto++ GCM handles non-12 byte nonces by hashing them.
-            // But ToClient.cpp uses iv.data(), 16.
-            // Since we can't easily do 16-byte nonce GCM in standard .NET, and the server implementation
-            // is likely assuming 12-byte nonce if it's following standard GCM... wait.
-            // Actually, ToClient.cpp says:
-            // CryptoPP::SecByteBlock iv(CryptoPP::AES::BLOCKSIZE); // IV size = 16 bytes
-            // e.SetKeyWithIV(cliPrivateKey, cliPrivateKey.size(), iv.data(), CryptoPP::AES::BLOCKSIZE);
-
-            // If the server strictly requires 16-byte nonce, we might need a different approach.
-            // But let's try 12-byte nonce first as it's the GCM standard.
-            // Actually, if I use 12-byte nonce in .NET, I can only send 12 bytes.
-
-            // To match the server, we must send what it expects.
-            // It expects Base64(Ciphertext+Tag) + \0 + 16-byte IV.
-
-            // Let's use the first 12 bytes of our 16-byte IV for AesGcm.
             byte[] nonce = new byte[12];
             Array.Copy(iv, 0, nonce, 0, 12);
 
@@ -231,6 +257,7 @@ namespace DiagnosticTool
         {
             try
             {
+                if (data.Length < 17) return null;
                 int ivPos = data.Length - 16;
                 byte[] iv = new byte[16];
                 Array.Copy(data, ivPos, iv, 0, 16);
@@ -263,6 +290,11 @@ namespace DiagnosticTool
         static ushort ReadUShort(byte[] data, int pos)
         {
             return (ushort)((data[pos] << 8) | data[pos + 1]);
+        }
+
+        static uint ReadUInt(byte[] data, int pos)
+        {
+            return (uint)((data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]);
         }
 
         static void WriteUShort(Stream s, ushort val)
