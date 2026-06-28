@@ -92,8 +92,9 @@ namespace DiagnosticTool
                     return;
                 }
 
-                // Data starts at offset 6: [Short len][Data]
-                ushort keyLen = ReadUShort(payload, 6);
+                // Parse keyLen to find where data starts
+                int pos = 6;
+                ushort keyLen = (ushort)((payload[pos] << 8) | payload[pos + 1]);
                 byte[] publicKeyBytes = new byte[keyLen];
                 Array.Copy(payload, 8, publicKeyBytes, 0, keyLen);
 
@@ -135,9 +136,11 @@ namespace DiagnosticTool
                 Console.WriteLine("Sent CMD_CM_KITBAGTEMPlocks.");
 
                 // 4. Receive Response
-                byte[] finalPayload = ReadPacket(stream);
-                if (finalPayload != null)
+                while (client.Connected)
                 {
+                    byte[] finalPayload = ReadPacket(stream);
+                    if (finalPayload == null) break;
+
                     if (finalPayload.Length >= 6)
                     {
                         uint respSess = ReadUInt(finalPayload, 0);
@@ -148,10 +151,6 @@ namespace DiagnosticTool
                         Console.WriteLine("--- Received Response ---");
                         Console.WriteLine(parser.Parse(new GamePacket { Len = (ushort)(finalPayload.Length + 2), Cmd = respCmd, Payload = respData }));
                     }
-                }
-                else
-                {
-                    Console.WriteLine("No response received.");
                 }
             }
             catch (Exception ex)
@@ -178,7 +177,8 @@ namespace DiagnosticTool
             while (totalRead < payload.Length)
             {
                 read = stream.Read(payload, totalRead, payload.Length - totalRead);
-                if (read <= 0) break;
+                if (read < 0) break;
+                if (read == 0) return null;
                 totalRead += read;
             }
 

@@ -1,6 +1,6 @@
 using System;
 using System.Text;
-using System.Linq;
+using System.Collections.Generic;
 
 namespace PacketDecoder
 {
@@ -29,102 +29,114 @@ namespace PacketDecoder
 
             try
             {
+                int pos = 0;
                 switch (pkt.Cmd)
                 {
                     case 36: // CMD_CM_KITBAGTEMPlocks
-                        ParseKitbagTempLocks(pkt, sb);
+                        ParseKitbagTempLocks(pkt.Payload, ref pos, sb);
                         break;
                     case 355: // CMD_CM_SEND_PRIVATE_KEY
-                        ParseSendPrivateKey(pkt, sb);
+                        ParseSendPrivateKey(pkt.Payload, ref pos, sb);
                         break;
                     case 943: // CMD_MC_SEND_SERVER_PUBLIC_KEY
-                        ParseSendServerPublicKey(pkt, sb);
+                        ParseSendServerPublicKey(pkt.Payload, ref pos, sb);
                         break;
                     case 517: // CMD_MC_SYSINFO
-                        ParseSysInfo(pkt, sb);
+                        ParseSysInfo(pkt.Payload, ref pos, sb);
                         break;
-                    case 940: // CMD_MC_LOG (Inferred from example)
-                        ParseLog(pkt, sb);
+                    case 940: // CMD_MC_LOG
+                        ParseLog(pkt.Payload, ref pos, sb);
+                        break;
+                    case 431: // CMD_CM_LOGIN
+                        ParseCMLogin(pkt.Payload, ref pos, sb);
+                        break;
+                    case 931: // CMD_MC_LOGIN
+                        ParseMCLogin(pkt.Payload, ref pos, sb);
                         break;
                     default:
-                        ParseGeneric(pkt, sb);
+                        ParseGeneric(pkt, ref pos, sb);
                         break;
+                }
+
+                if (pos < pkt.Payload.Length)
+                {
+                    int remaining = pkt.Payload.Length - pos;
+                    sb.AppendLine($"> Remaining Unparsed Data ({remaining} bytes): " + BitConverter.ToString(pkt.Payload, pos).Replace("-", " "));
                 }
             }
             catch (Exception ex)
             {
                 sb.AppendLine($"[Parse Error: {ex.Message}]");
-                ParseGeneric(pkt, sb);
             }
 
             return sb.ToString();
         }
 
-        private void ParseKitbagTempLocks(GamePacket pkt, StringBuilder sb)
+        private void ParseKitbagTempLocks(byte[] data, ref int pos, StringBuilder sb)
         {
-            int pos = 0;
-            if (pkt.Payload.Length >= 4)
-            {
-                uint counter = ReadUInt(pkt.Payload, ref pos);
-                sb.AppendLine($"> Counter: {counter}");
-            }
-            if (pos + 2 <= pkt.Payload.Length)
-            {
-                ushort val = ReadUShort(pkt.Payload, ref pos);
-                sb.AppendLine($"> Value: {val}");
-            }
-            string s = ReadString(pkt.Payload, ref pos);
-            sb.AppendLine($"> String: \"{s}\"");
+            sb.AppendLine($"> Counter: {ReadUInt(data, ref pos)}");
+            sb.AppendLine($"> Value: {ReadUShort(data, ref pos)}");
+            sb.AppendLine($"> String: \"{ReadString(data, ref pos)}\"");
         }
 
-        private void ParseSendPrivateKey(GamePacket pkt, StringBuilder sb)
+        private void ParseSendPrivateKey(byte[] data, ref int pos, StringBuilder sb)
         {
-            int pos = 0;
-            if (pkt.Payload.Length >= 4)
-            {
-                uint counter = ReadUInt(pkt.Payload, ref pos);
-                sb.AppendLine($"> Counter: {counter}");
-            }
-            string key = ReadString(pkt.Payload, ref pos);
-            sb.AppendLine($"> Encrypted AES Key (Base64): {key}");
+            sb.AppendLine($"> Counter: {ReadUInt(data, ref pos)}");
+            sb.AppendLine($"> Encrypted AES Key (Base64): {ReadString(data, ref pos)}");
         }
 
-        private void ParseSendServerPublicKey(GamePacket pkt, StringBuilder sb)
+        private void ParseSendServerPublicKey(byte[] data, ref int pos, StringBuilder sb)
         {
-            int pos = 0;
-            ushort keyLen = ReadUShort(pkt.Payload, ref pos);
-            sb.AppendLine($"> RSA Public Key Len: {keyLen}");
-            if (pos + keyLen <= pkt.Payload.Length)
+            // CMD_MC_SEND_SERVER_PUBLIC_KEY sends: l_wpk.WriteShort(publickey.size()); l_wpk.WriteSequence(...)
+            // WriteSequence also writes a short len. So there are TWO shorts.
+            ushort outerLen = ReadUShort(data, ref pos);
+            ushort innerLen = ReadUShort(data, ref pos);
+            sb.AppendLine($"> RSA Public Key Size: {outerLen} (inner: {innerLen})");
+
+            int keyLen = Math.Min((int)innerLen, data.Length - pos);
+            if (keyLen > 0)
             {
                 byte[] key = new byte[keyLen];
-                Array.Copy(pkt.Payload, pos, key, 0, keyLen);
+                Array.Copy(data, pos, key, 0, keyLen);
                 sb.AppendLine($"> RSA Public Key (Hex): {BitConverter.ToString(key).Replace("-", "")}");
+                pos += keyLen;
             }
         }
 
-        private void ParseSysInfo(GamePacket pkt, StringBuilder sb)
+        private void ParseSysInfo(byte[] data, ref int pos, StringBuilder sb)
         {
-            int pos = 0;
-            string msg = ReadString(pkt.Payload, ref pos);
-            sb.AppendLine($"> System Message: \"{msg}\"");
+            sb.AppendLine($"> System Message: \"{ReadString(data, ref pos)}\"");
         }
 
-        private void ParseLog(GamePacket pkt, StringBuilder sb)
+        private void ParseLog(byte[] data, ref int pos, StringBuilder sb)
         {
-            int pos = 0;
-            string log = ReadString(pkt.Payload, ref pos);
-            sb.AppendLine($"> Log Message: \"{log}\"");
+            sb.AppendLine($"> Log Message: \"{ReadString(data, ref pos)}\"");
         }
 
-        private void ParseGeneric(GamePacket pkt, StringBuilder sb)
+        private void ParseCMLogin(byte[] data, ref int pos, StringBuilder sb)
+        {
+            sb.AppendLine($"> Counter: {ReadUInt(data, ref pos)}");
+            sb.AppendLine($"> User: \"{ReadString(data, ref pos)}\"");
+            sb.AppendLine($"> Password: \"{ReadString(data, ref pos)}\"");
+            sb.AppendLine($"> Version: {ReadUShort(data, ref pos)}");
+        }
+
+        private void ParseMCLogin(byte[] data, ref int pos, StringBuilder sb)
+        {
+            if (data.Length - pos == 2)
+            {
+                sb.AppendLine($"> Error Code: {ReadUShort(data, ref pos)}");
+                return;
+            }
+            sb.AppendLine($"> Success Flag: {data[pos++]}");
+        }
+
+        private void ParseGeneric(GamePacket pkt, ref int pos, StringBuilder sb)
         {
             sb.AppendLine("Hex Dump: " + BitConverter.ToString(pkt.Payload).Replace("-", " "));
-            int pos = 0;
-            // Many client packets have a 4-byte counter at the start
             if (pkt.Payload.Length >= 4 && ((pkt.Cmd > 0 && pkt.Cmd <= 500) || (pkt.Cmd >= 6000 && pkt.Cmd <= 6500)))
             {
-                uint counter = ReadUInt(pkt.Payload, ref pos);
-                sb.AppendLine($"> Counter: {counter}");
+                sb.AppendLine($"> Counter: {ReadUInt(pkt.Payload, ref pos)}");
             }
 
             while (pos < pkt.Payload.Length)
@@ -136,7 +148,7 @@ namespace PacketDecoder
                     if (strLen > 0 && strLen <= remain - 2)
                     {
                         string s = Encoding.UTF8.GetString(pkt.Payload, pos + 2, strLen);
-                        if (s.EndsWith("\0"))
+                        if (s.Length > 0 && s[s.Length - 1] == '\0')
                         {
                             sb.AppendLine($"> Data String[{strLen}]: \"{s.TrimEnd('\0')}\"");
                             pos += 2 + strLen;
@@ -165,6 +177,7 @@ namespace PacketDecoder
 
         private ushort ReadUShort(byte[] data, ref int pos)
         {
+            if (pos + 2 > data.Length) return 0;
             ushort val = (ushort)((data[pos] << 8) | data[pos + 1]);
             pos += 2;
             return val;
@@ -172,6 +185,7 @@ namespace PacketDecoder
 
         private uint ReadUInt(byte[] data, ref int pos)
         {
+            if (pos + 4 > data.Length) return 0;
             uint val = (uint)((data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]);
             pos += 4;
             return val;
