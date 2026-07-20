@@ -157,3 +157,42 @@ To build a modern client (e.g., in Python, C#, Rust, Go, or TypeScript) that can
    - Write MAC Address (String, e.g. "00-11-22-33-44-55").
    - Write constant integer/short identifiers (e.g., version identifier, default 911).
 2. Enjoy communicating with the defunct server under a robust modern architecture!
+
+---
+
+## 7. Concrete Packet Example: CMD_CM_LOGIN (431)
+
+To help visualize how the layout maps to real wire packets, let's dissect an actual unencrypted client login packet stream of length **88 bytes** (`0x58`):
+
+### The Hex Stream
+```text
+00 58 80 00 00 00 01 AF 00 00 00 00 00 07 6E 6F 62 69 6C 6C 00 00 07 61 6C 74 69 6E 73 00 00 18 BC 3F 05 1B 59 04 F3 2E 2D 70 A8 7D 15 73 E9 3E 10 66 8F 8F ED 7F DF D1 00 18 43 30 2D 31 38 2D 35 30 2D 33 34 2D 38 30 2D 34 46 2D 30 30 2D 30 30 00 03 8F 00 88 18 BC
+```
+
+### Byte-by-Byte Layout Breakdown
+
+| Byte Offset (Hex) | Byte Values | Field Name | Decoded Value & Analysis |
+|---|---|---|---|
+| `00 - 01` | `00 58` | **Length (Header)** | `88` (decimal). Specifies total payload bytes. |
+| `02 - 05` | `80 00 00 00` | **Session ID (`SESS`)** | `0x80000000` (4 bytes). Managed by `RPCMGR`. |
+| `06 - 07` | `01 AF` | **Command ID (`CMD`)** | `431` (`CMD_CM_LOGIN`). |
+| `08 - 0B` | `00 00 00 00` | **WPE Packet Counter** | `0` (4-byte counter inserted since CMD <= 500). |
+| `0C - 0D` | `00 07` | **Account Length** | `7` bytes (length of string including null-terminator). |
+| `0E - 14` | `6E 6F 62 69 6C 6C 00` | **Account Name** | `"nobill\0"`. |
+| `15 - 16` | `00 07` | **Password/Token Length** | `7` bytes. |
+| `17 - 1D` | `61 6C 74 69 6E 73 00` | **Password / Token** | `"altins\0"`. |
+| `1E - 1F` | `00 18` | **Hash/Passport Length** | `24` bytes (`0x0018`). |
+| `20 - 37` | `BC 3F 05 1B 59 04 F3 2E 2D 70 A8 7D 15 73 E9 3E 10 66 8F 8F ED 7F DF D1` | **Hash/Passport Digest** | `24` bytes of binary/digest data. |
+| `38 - 39` | `00 18` | **MAC Address Length** | `24` bytes. |
+| `3A - 51` | `43 30 2D 31 38 2D 35 30 2D 33 34 2D 38 30 2D 34 46 2D 30 30 2D 30 30 00` | **MAC Address String** | `"C0-18-50-34-80-4F-00-00\0"`. |
+| `52 - 53` | `03 8F` | **Short Security Marker** | `911` (`0x038F`). Standard anti-bypass indicator. |
+| `54 - 55` | `00 88` | **Short Client Version** | `136` (`0x0088`). Client build version. |
+| `56 - 57` | `18 BC` | **Short Alternative/Build**| `6332` (`0x18BC`). DX9 build or memory recycling padding. |
+
+---
+
+### Highlights for Client Recreators
+
+1. **Length-Prefixed Strings**: Notice how every string parameter is prefixed with a 2-byte length in network byte order, and includes the trailing `\0` (null-terminator) in its character payload and length count.
+2. **Backwards Parsing**: When verifying login, the server parses the version and safety checks backwards (`ReverseReadShort()`), which explains why `18 BC` (Version `6332`), `00 88` (Build `136`), and `03 8F` (`911`) sit at the very end of the packet structure.
+3. **Anti-WPE insertion**: The counter `00 00 00 00` resides immediately after `CMD_CM_LOGIN`'s `01 AF`, shifting the subsequent parameter reads in the raw buffer by 4 bytes.
